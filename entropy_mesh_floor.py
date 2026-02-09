@@ -142,124 +142,143 @@ def main():
 
     # Vector field: rows x cols x 2 (vx, vy) in an abstract space
     # We'll map magnitude and orientation to lift and brightness.
+    # Initialize each vector with a unique seed
     field = np.zeros((rows, cols, 2), dtype=np.float32)
+    seeds = np.zeros((rows, cols), dtype=np.int32)
+    for j in range(rows):
+        for i in range(cols):
+            # Unique seed per vector based on position, always positive and safe
+            seeds[j, i] = j * cols + i
+            rng = np.random.RandomState(seeds[j, i])
+            field[j, i] = rng.normal(0, 1, size=2)
 
     font = pygame.font.SysFont(None, 24)
 
-    running = True
-    while running:
-        dt = clock.tick(FPS) / 1000.0
+    log_path = os.path.join(os.path.dirname(__file__), "entropy_mesh_log.txt")
+    with open(log_path, "w") as logfile:
+        running = True
+        frame_count = 0
+        while running:
+            dt = clock.tick(FPS) / 1000.0
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-        # Update field and get current entropy
-        entropy = update_field(field, dt)
+            # Update field and get current entropy
+            entropy = update_field(field, dt)
 
-        screen.fill(BACKGROUND_COLOR)
+            screen.fill(BACKGROUND_COLOR)
 
-        # Normalize entropy for overlay text: higher = slower
-        speed_scale = (1.0 - entropy) * (1.0 - MIN_SPEED_SCALE) + MIN_SPEED_SCALE
+            # Normalize entropy for overlay text: higher = slower
+            speed_scale = (1.0 - entropy) * (1.0 - MIN_SPEED_SCALE) + MIN_SPEED_SCALE
 
-        projected = [None] * len(grid_points)
+            projected = [None] * len(grid_points)
 
-        # Compute local entropy for each point (windowed neighborhood)
-        local_entropy = np.zeros((rows, cols), dtype=np.float32)
-        window = 2  # neighborhood radius
-        for j in range(rows):
-            for i in range(cols):
-                j0 = max(0, j - window)
-                j1 = min(rows, j + window + 1)
-                i0 = max(0, i - window)
-                i1 = min(cols, i + window + 1)
-                neighborhood = field[j0:j1, i0:i1].reshape(-1, 2)
-                local_entropy[j, i] = compute_entropy(neighborhood)
+            # Compute local entropy for each point (windowed neighborhood)
+            local_entropy = np.zeros((rows, cols), dtype=np.float32)
+            window = 2  # neighborhood radius
+            for j in range(rows):
+                for i in range(cols):
+                    j0 = max(0, j - window)
+                    j1 = min(rows, j + window + 1)
+                    i0 = max(0, i - window)
+                    i1 = min(cols, i + window + 1)
+                    neighborhood = field[j0:j1, i0:i1].reshape(-1, 2)
+                    local_entropy[j, i] = compute_entropy(neighborhood)
 
-        for idx, (x_plane, z_depth, u, v, i, j) in enumerate(grid_points):
-            wx = x_plane
-            wy = 0.0
-            wz = -z_depth
+            # Log info for this frame
+            logfile.write(f"Frame {frame_count}: entropy={entropy:.4f}, speed_scale={speed_scale:.4f}\n")
+            for j in range(rows):
+                for i in range(cols):
+                    vec = field[j, i]
+                    logfile.write(f"  Vector[{j},{i}] seed={seeds[j,i]} value=({vec[0]:.4f},{vec[1]:.4f}) local_entropy={local_entropy[j,i]:.4f}\n")
 
-            vx = wx
-            vy = wy - camera_y
-            vz = wz
+            for idx, (x_plane, z_depth, u, v, i, j) in enumerate(grid_points):
+                wx = x_plane
+                wy = 0.0
+                wz = -z_depth
 
-            depth = -vz
-            if depth <= 0.0:
-                continue
+                vx = wx
+                vy = wy - camera_y
+                vz = wz
 
-            sx = int(WINDOW_WIDTH / 2 + vx * proj_scale / depth)
-            sy = int(WINDOW_HEIGHT / 2 - vy * proj_scale / depth)
+                depth = -vz
+                if depth <= 0.0:
+                    continue
 
-            if sx < 0 or sx >= WINDOW_WIDTH or sy < 0 or sy >= WINDOW_HEIGHT:
-                continue
+                sx = int(WINDOW_WIDTH / 2 + vx * proj_scale / depth)
+                sy = int(WINDOW_HEIGHT / 2 - vy * proj_scale / depth)
 
-            vec = field[j, i]
-            mag = float(np.linalg.norm(vec))
+                if sx < 0 or sx >= WINDOW_WIDTH or sy < 0 or sy >= WINDOW_HEIGHT:
+                    continue
 
-            # Tremble: offset dot position by vector, scaled by entropy
-            tremble_scale = (1.0 - entropy) * 1.2 + 0.2  # more tremble, less damping
-            tremble_x = vec[0] * tremble_scale
-            sx = int(sx + tremble_x)
-            # sy remains unchanged for horizontal-only trembling
+                vec = field[j, i]
+                mag = float(np.linalg.norm(vec))
 
-            if sx < 0 or sx >= WINDOW_WIDTH or sy < 0 or sy >= WINDOW_HEIGHT:
-                continue
+                # Tremble: offset dot position by vector, scaled by entropy
+                tremble_scale = (1.0 - entropy) * 1.2 + 0.2  # more tremble, less damping
+                tremble_x = vec[0] * tremble_scale
+                sx = int(sx + tremble_x)
+                # sy remains unchanged for horizontal-only trembling
 
-            depth_norm = (z_depth - near_z) / (far_z - near_z + 1e-6)
-            depth_norm = max(0.0, min(1.0, depth_norm))
+                if sx < 0 or sx >= WINDOW_WIDTH or sy < 0 or sy >= WINDOW_HEIGHT:
+                    continue
 
-            # Color code: map local entropy to color (blue=low, green=mid, red=high)
-            le = local_entropy[j, i]
-            r = int(255 * le)
-            g = int(255 * (1.0 - abs(le - 0.3) * 2))  # green at lower entropy
-            b = int(255 * (1.0 - le))
+                depth_norm = (z_depth - near_z) / (far_z - near_z + 1e-6)
+                depth_norm = max(0.0, min(1.0, depth_norm))
 
-            # Brightness from magnitude, softly faded by depth
-            brightness = 0.15 + (mag / MAX_SPEED) * 0.7
-            brightness *= (0.4 + 0.6 * (1.0 - depth_norm))
-            brightness = max(0.0, min(1.0, brightness))
-            r = int(r * brightness)
-            g = int(g * brightness)
-            b = int(b * brightness)
-            # Clamp color values to valid range
-            r = max(0, min(255, r))
-            g = max(0, min(255, g))
-            b = max(0, min(255, b))
+                # Color code: map local entropy to color (blue=low, green=mid, red=high)
+                le = local_entropy[j, i]
+                r = int(255 * le)
+                g = int(255 * (1.0 - abs(le - 0.3) * 2))  # green at lower entropy
+                b = int(255 * (1.0 - le))
 
-            projected[idx] = (sx, sy, brightness, r, g, b)
+                # Brightness from magnitude, softly faded by depth
+                brightness = 0.15 + (mag / MAX_SPEED) * 0.7
+                brightness *= (0.4 + 0.6 * (1.0 - depth_norm))
+                brightness = max(0.0, min(1.0, brightness))
+                r = int(r * brightness)
+                g = int(g * brightness)
+                b = int(b * brightness)
+                # Clamp color values to valid range
+                r = max(0, min(255, r))
+                g = max(0, min(255, g))
+                b = max(0, min(255, b))
 
-        # Draw mesh lines
-        for a, b in edges:
-            pa = projected[a]
-            pb = projected[b]
-            if pa is None or pb is None:
-                continue
-            x1, y1, br1, r1, g1, b1 = pa
-            x2, y2, br2, r2, g2, b2 = pb
+                projected[idx] = (sx, sy, brightness, r, g, b)
 
-            br = max(0.0, min(1.0, (br1 + br2) * 0.5)) * 0.7
-            lr = int(DOT_COLOR_BASE[0] * br)
-            lg = int(DOT_COLOR_BASE[1] * br)
-            lb = int(DOT_COLOR_BASE[2] * br)
+            # Draw mesh lines
+            for a, b in edges:
+                pa = projected[a]
+                pb = projected[b]
+                if pa is None or pb is None:
+                    continue
+                x1, y1, br1, r1, g1, b1 = pa
+                x2, y2, br2, r2, g2, b2 = pb
 
-            pygame.draw.line(screen, (lr, lg, lb), (x1, y1), (x2, y2), 1)
+                br = max(0.0, min(1.0, (br1 + br2) * 0.5)) * 0.7
+                lr = int(DOT_COLOR_BASE[0] * br)
+                lg = int(DOT_COLOR_BASE[1] * br)
+                lb = int(DOT_COLOR_BASE[2] * br)
 
-        # Draw dots on top
-        for p in projected:
-            if p is None:
-                continue
-            sx, sy, brightness, r, g, b = p
-            pygame.draw.circle(screen, (r, g, b), (sx, sy), DOT_BASE_RADIUS)
+                pygame.draw.line(screen, (lr, lg, lb), (x1, y1), (x2, y2), 1)
 
-        # HUD text showing entropy & speed scaling
-        text = f"entropy: {entropy:.3f}  speed: {speed_scale:.3f}"
-        surf = font.render(text, True, (200, 200, 220))
-        screen.blit(surf, (10, 10))
+            # Draw dots on top
+            for p in projected:
+                if p is None:
+                    continue
+                sx, sy, brightness, r, g, b = p
+                pygame.draw.circle(screen, (r, g, b), (sx, sy), DOT_BASE_RADIUS)
 
-        pygame.display.flip()
+            # HUD text showing entropy & speed scaling
+            text = f"entropy: {entropy:.3f}  speed: {speed_scale:.3f}"
+            surf = font.render(text, True, (200, 200, 220))
+            screen.blit(surf, (10, 10))
 
+            pygame.display.flip()
+
+            frame_count += 1
     pygame.quit()
 
 
